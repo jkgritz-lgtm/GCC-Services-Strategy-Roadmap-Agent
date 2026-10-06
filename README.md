@@ -1,147 +1,265 @@
 # GCC-Services-Strategy-Roadmap-Agent
-An agent that builds the services strategy roadmap
-services-roadmap-agent/
-├── README.md
-├── requirements.txt
-├── config.yaml
-└── agent.py
-google-genai>=0.1.0
-pyyaml>=6.0.1
-pydantic>=2.0.0
-model_name: "gemini-2.5-pro"
-temperature: 0.2
-system_instruction: |
-  You are an expert Google Cloud Consulting (GCC) Pursuit Lead and Services Architect. 
-  Your job is to generate a comprehensive, executive-ready Services Strategy Roadmap based on:
-  1. Business Outcomes (What the client wants to achieve)
-  2. Workstreams (The technical/consulting activities to promote these outcomes)
-  3. KPIs/Measurements (How success will be demonstrated)
-  
-  Format the output beautifully using structured markdown tables, bold key takeaways, and clear timelines.
+1. Project Configuration Files
+Place these in the root of your gcc-delivery-strategy folder.
+
+pyproject.toml
+
+toml
+[project]
+name = "gcc-delivery-strategy"
+version = "0.1.0"
+description = "An AI agent deployed on Gemini Enterprise designed to generate a comprehensive Service Delivery Strategy roadmap based on user-uploaded documents and interactive chat inputs, outputting the final deliverable as a Google Slides presentation."
+authors = [
+    {name = "Your Name", email = "your@email.com"},
+]
+
+dependencies = [
+    "google-adk[gcp,otel-gcp]>=2.6.0,<3.0.0",
+    "opentelemetry-resourcedetector-gcp<=1.12.0a0",
+    "gcsfs>=2024.11.0",
+    "a2a-sdk[http-server]>=1.0,<2",
+    "aiohttp>=3.13.4",
+    "google-cloud-logging>=3.12.0,<4.0.0",
+    "google-cloud-aiplatform[evaluation,agent-engines]>=1.156.0",
+    "protobuf>=6.31.1,<7.0.0",
+]
+requires-python = ">=3.11,<3.14"
+
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2,<10.0.0",
+    "pytest-asyncio>=1.0.0,<2.0.0",
+    "nest-asyncio>=1.6.0,<2.0.0",
+]
+
+[project.optional-dependencies]
+eval = [
+    "google-adk[eval]>=2.6.0,<3.0.0",
+    "google-cloud-aiplatform[evaluation]>=1.156.0",
+]
+lint = [
+    "ruff>=0.4.6,<1.0.0",
+    "ty>=0.0.1a0",
+    "codespell>=2.2.0,<3.0.0",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "C",  # flake8-comprehensions
+    "B",   # flake8-bugbear
+    "UP", # pyupgrade
+    "RUF", # ruff specific rules
+]
+ignore = ["E501", "C901", "B006"] # ignore line too long, too complex
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "frontend"]
+
+[tool.ty]
+[tool.ty.environment]
+python-version = "3.10"
+
+[tool.ty.src]
+exclude = [".venv/**"]
+
+[tool.ty.rules]
+unresolved-import = "ignore"
+unresolved-attribute = "ignore"
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+invalid-return-type = "ignore"
+possibly-missing-attribute = "ignore"
+not-subscriptable = "ignore"
+deprecated = "ignore"
+
+[tool.codespell]
+ignore-words-list = "rouge"
+skip = "./locust_env/*,uv.lock,.venv,./frontend,**/package-lock.json"
+
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+
+[tool.pytest.ini_options]
+pythonpath = "."
+asyncio_default_fixture_loop_scope = "session"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app","frontend"]
+.env
+
+GOOGLE_CLOUD_PROJECT="agent-catalog-demo-1"
+GOOGLE_CLOUD_LOCATION="global"
+GOOGLE_GENAI_USE_VERTEXAI="True"
+2. Application Core & Orchestrator
+Create a folder named app. Inside the app folder, create these files:
+
+app/agent.py
+
 import os
-import yaml
-from typing import List, Dict, Any
-from pydantic import BaseModel, Field
-from google import genai
-from google.genai import types
+import google.auth
+from google.adk.apps import App
+from google.adk.agents import SequentialAgent, LlmAgent
+from app.sub_agents.document_analyzer import document_analyzer
+from app.sub_agents.strategy_synthesizer import strategy_synthesizer
+from app.sub_agents.slides_generator import slides_generator
 
-# Define strict schemas for input validation
-class Workstream(BaseModel):
-    name: str = Field(description="Name of the consulting or engineering workstream (e.g., Data Foundation, Enablement)")
-    description: str = Field(description="Detailed activities and objectives of this workstream")
+try:
+    _, project_id = google.auth.default()
+except Exception:
+    project_id = "agent-catalog-demo-1" # Fallback if local auth is missing
 
-class OutcomeKPI(BaseModel):
-    outcome: str = Field(description="Desired customer business outcome")
-    kpi: str = Field(description="Quantifiable Key Performance Indicator or measurement of success")
+os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
+os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
+os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
 
-class StrategyInput(BaseModel):
-    customer_name: str = Field(description="The name of the target customer/opportunity")
-    target_timeline: str = Field(description="The implementation timeline (e.g., Q4 2026, 6 Months)")
-    outcomes_and_kpis: List[OutcomeKPI] = Field(description="List of desired outcomes mapped to their KPIs")
-    workstreams: List[Workstream] = Field(description="The program workstreams that drive these outcomes")
+# Main Sequential Orchestrator
+pipeline_agent = SequentialAgent(
+    name="GCC_Service_Delivery_Strategy_Pipeline",
+    description="A sequential pipeline to analyze documents, synthesize strategy with clarifications, and generate a Google Slides presentation.",
+    sub_agents=[
+        document_analyzer,
+        strategy_synthesizer,
+        slides_generator
+    ]
+)
 
-class ServicesStrategyAgent:
-    def __init__(self, config_path: str = "config.yaml"):
-        self.config = self._load_config(config_path)
-        # Initialize the official Google GenAI Client
-        # Expects GEMINI_API_KEY environment variable to be set
-        self.client = genai.Client()
+# Root agent that interacts with the user and delegates to the pipeline.
+root_agent = LlmAgent(
+    name="GCC_Service_Delivery_Strategy_Agent",
+    model="gemini-3.1-pro-preview",
+    instruction="""You are the main orchestrator for the GCC Service Delivery Strategy.
+Your job is to assist the user by taking their inputs (documents and chat) and passing them into the `GCC_Service_Delivery_Strategy_Pipeline`.
+Delegate the task to `GCC_Service_Delivery_Strategy_Pipeline` to perform document analysis, strategy synthesis, and Google Slides generation.
+Once the pipeline is complete, summarize the results and provide the presentation link.""",
+    description="Main orchestrator agent controlling the GCC Service Delivery Strategy pipeline. Manages multi-agent execution across analysis, clarification/assumptions, synthesis, and Google Slides output creation.",
+    sub_agents=[pipeline_agent]
+)
 
-    def _load_config(self, path: str) -> Dict[str, Any]:
-        with open(path, 'r') as file:
-            return yaml.safe_load(file)
+app = App(
+    root_agent=root_agent,
+    name="app",
+)
+(Note: Also create an empty file named __init__.py inside the app folder.)
 
-    def generate_roadmap(self, input_data: StrategyInput) -> str:
-        """
-        Processes inputs and generates a polished services strategy roadmap using Gemini.
-        """
-        # Formulate a structured prompt for the model
-        prompt = f"""
-        Generate a Services Strategy Roadmap for the following customer opportunity:
-        
-        **Customer:** {input_data.customer_name}
-        **Timeline:** {input_data.target_timeline}
-        
-        **Business Outcomes & Success Metrics (KPIs):**
-        {self._format_outcomes(input_data.outcomes_and_kpis)}
-        
-        **Proposed GCC/Partner Workstreams:**
-        {self._format_workstreams(input_data.workstreams)}
-        
-        Please synthesize this data into a professional Consulting Services Strategy Document. 
-        It must contain:
-        1. An Executive Summary aligning outcomes to the workstreams.
-        2. A Markdown Table mapping: Business Outcome -> Driving Workstream -> KPI Success Metric.
-        3. A Phased Implementation Roadmap timeline showing crawl, walk, and run phases.
-        """
+3. Custom Tools
+Create a folder named app_utils inside your app folder. Inside it, create an empty __init__.py and the following file:
 
-        response = self.client.models.generate_content(
-            model=self.config.get("model_name", "gemini-2.5-pro"),
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=self.config.get("system_instruction"),
-                temperature=self.config.get("temperature", 0.2),
-            )
-        )
-        return response.text
+app/app_utils/tools.py
 
-    def _format_outcomes(self, items: List[OutcomeKPI]) -> str:
-        return "\n".join([f"- Outcome: {item.outcome} | KPI: {item.kpi}" for item in items])
+python
+from google.adk.tools import ToolContext
+import json
 
-    def _format_workstreams(self, items: List[Workstream]) -> str:
-        return "\n".join([f"- {item.name}: {item.description}" for item in items])
-
-# Example Usage
-if __name__ == "__main__":
-    # Sample input modeling a real-world FSI scenario (like your Aon or Morgan Stanley deals)
-    sample_input = StrategyInput(
-        customer_name="Aon",
-        target_timeline="6 Months (Starting Oct 2026)",
-        outcomes_and_kpis=[
-            OutcomeKPI(
-                outcome="Accelerate risk assessment modeling using Generative AI",
-                kpi="Reduce model generation time from 5 days to under 4 hours"
-            ),
-            OutcomeKPI(
-                outcome="Establish robust AI Governance and compliance",
-                kpi="100% of deployed models adhere to Google Cloud's Responsible AI guidelines"
-            )
-        ],
-        workstreams=[
-            Workstream(
-                name="AI Foundation & Vertex AI Setup",
-                description="Establish landing zones, secure data pipelines, and configure Vertex AI model registries."
-            ),
-            Workstream(
-                name="Enablement & CoE Framework",
-                description="Deliver standard enablement workshops to upskill engineering leads and draft governance playbooks."
-            )
-        ]
-    )
-
-    agent = ServicesStrategyAgent()
-    print("🚀 Running Services Strategy Agent...")
-    roadmap_output = agent.generate_roadmap(sample_input)
+def document_reader(document_path: str, tool_context: ToolContext) -> dict:
+    """Utility tool for reading and parsing uploaded document files (PDFs, Docs, Spreadsheets).
     
-    # Save the output to a file
-    with open("strategy_roadmap_output.md", "w") as f:
-        f.write(roadmap_output)
-    print("✅ Roadmap generated and saved to 'strategy_roadmap_output.md'!")
-# Services Strategy Roadmap Agent 🚀
+    Use this tool to extract text from a provided document path.
+    
+    Args:
+        document_path (str): The path or name of the document file to read.
+        
+    Returns:
+        dict: The extracted text from the document, or an error message.
+    """
+    try:
+        # In a real environment, this would parse PDFs, Docs, etc.
+        # For ADK simulation, we simulate extracting content or reading an artifact.
+        return {
+            "status": "success",
+            "content": f"Simulated parsed content from {document_path}. Contains customer service delivery requirements, scope, and objectives."
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
-This AI Agent automates the generation of client-ready **Services Strategy Roadmaps** for Google Cloud Consulting (GCC) opportunities. It takes strategic business outcomes, maps them to program workstreams, and aligns them to measurable Key Performance Indicators (KPIs).
+def google_slides_generator(presentation_title: str, slide_content_json: str, tool_context: ToolContext) -> dict:
+    """Programmatically creates a formatted Google Slides presentation from structured JSON content via Google Workspace Slides API.
+    
+    Use this tool to generate the final Google Slides deck once all strategy sections are finalized.
+    
+    Args:
+        presentation_title (str): The title for the new Google Slides presentation.
+        slide_content_json (str): A JSON string containing the structured slide data 
+                                  (Vision, Strategy, Commercials, Approach, Roles, Operating Model).
+        
+    Returns:
+        dict: Status and the URL to the generated Google Slides presentation.
+    """
+    try:
+        # Validate JSON
+        json.loads(slide_content_json)
+        # Mock Google Workspace Slides API interaction
+        presentation_url = f"https://docs.google.com/presentation/d/mock_presentation_id/edit?title={presentation_title.replace(' ', '_')}"
+        return {
+            "status": "success",
+            "message": "Google Slides presentation generated successfully.",
+            "url": presentation_url
+        }
+    except json.JSONDecodeError:
+        return {"status": "error", "message": "Invalid JSON format for slide_content_json."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+4. The Sub-Agents
+Create a folder named sub_agents inside your app folder. Inside it, create an empty __init__.py and the following three files:
 
-## Features
-- **Pydantic Validation:** Ensures input integrity before generating roadmaps.
-- **Configurable Prompting:** Easily modify model instructions inside `config.yaml`.
-- **Gemini 2.5 Pro Powered:** Leverages state-of-the-art reasoning to draft executive-ready strategies.
+app/sub_agents/document_analyzer.py
 
-## Setup Instructions
+from google.adk.agents import LlmAgent
+from app.app_utils.tools import document_reader
 
-1. **Clone the Repository:**
-   ```bash
-   git clone https://github.com/your-username/services-roadmap-agent.git
-   cd services-roadmap-agent
-pip install -r requirements.txt
-export GEMINI_API_KEY="your-google-cloud-gemini-api-key"
-python agent.py
+document_analyzer = LlmAgent(
+    name="DocumentAnalyzerAgent",
+    model="gemini-3.1-pro-preview",
+    instruction="""You are the Document Analyzer Agent. Your goal is to analyze user-uploaded context documents and chat inputs.
+Extract content matching the following required roadmap sections: Vision, Services Delivery Strategy, Commercials, Delivery Approach, Roles & Responsibilities, and Operating Model.
+Identify any missing details or information gaps.
+Output your findings, explicitly listing extracted content and any gaps.""",
+    description="Analyze user-uploaded context documents and chat inputs to extract section content and identify missing details.",
+    tools=[document_reader],
+    output_key="extracted_document_context"
+)
+app/sub_agents/strategy_synthesizer.py
+
+python
+from google.adk.agents import LlmAgent
+
+strategy_synthesizer = LlmAgent(
+    name="StrategySynthesizerAgent",
+    model="gemini-3.1-pro-preview",
+    instruction="""You are the Strategy Synthesizer Agent. Your goal is to formulate core strategic sections: Vision, Services Delivery Strategy, Commercials, Delivery Approach, Roles & Responsibilities, and Operating Model.
+Use the context extracted by the DocumentAnalyzerAgent: {extracted_document_context}.
+If any critical information is missing, proactively prompt the user with clarifying questions and propose industry-standard assumptions for their approval.
+Once all information is gathered and approved, synthesize the finalized content for all 6 sections.""",
+    description="Formulate strategic sections, prompt user with clarifying questions, and propose industry-standard assumptions.",
+    tools=[],
+    output_key="finalized_strategy_content"
+)
+app/sub_agents/slides_generator.py
+
+python
+from google.adk.agents import LlmAgent
+from app.app_utils.tools import google_slides_generator
+
+slides_generator = LlmAgent(
+    name="SlidesGeneratorAgent",
+    model="gemini-3.1-pro-preview",
+    instruction="""You are the Slides Generator Agent. Your goal is to take the finalized strategic content from the Strategy Synthesizer Agent.
+Finalized Content: {finalized_strategy_content}
+
+Structure this finalized strategic content into standard slide layouts for all required sections (Vision, Services Delivery Strategy, Commercials, Delivery Approach, Roles & Responsibilities, Operating Model) formatted as a JSON string.
+Trigger the google_slides_generator tool with this structured JSON data to programmatically create the presentation deck. Provide the user with the link to the generated Google Slides.""",
+    description="Structure finalized strategic content into slide layouts and trigger the Google Slides API integration tool.",
+    tools=[google_slides_generator],
+    output_key="presentation_generation_result"
+)
